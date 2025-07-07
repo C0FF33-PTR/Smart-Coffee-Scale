@@ -1,10 +1,27 @@
-
+#include <Arduino.h>
 #include <HX711_ADC.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#if defined(ESP8266)|| defined(ESP32) || defined(AVR)
-#include <EEPROM.h>
-#endif
+
+
+#include <Preferences.h>
+
+#include <NimBLEDevice.h>
+#include <NimBLEServer.h>
+#include <NimBLEHIDDevice.h>
+
+void tareCallback();
+void beginCalibrationOfCurrentLoadcell_CALLBACK();
+void determineAndSetCalibrationFactorFromKnownWeight_CALLBACK(float knownWeight);
+
+
+
+#define DEVICE_NAME "Decent Scale" //has to be otherwise beanconqueror wont recognize it 
+#define DECENT_SCALE_SERVICE_UUID "FFF0"
+#define DECENT_SCALE_WEIGHT_CHARICTERISTIC_UUID "fff4"
+#define DECENT_SCALE_WRITE_CHARICTERISTIC_UUID "36f5"
+#define DECENT_SCALE_HEADER 0x03
+
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -20,6 +37,24 @@
 #define swapLoadCellPin 7
 #define powerPin 10
 #define tarePin 20
+
+
+namespace loadCellFactors {
+  float BigCellFactor;
+  float SmallCellFactor;
+};
+Preferences preferences;
+
+bool BLEConnected = false;
+
+
+enum DecentAPICommands : unsigned char {
+  TIMER = 0x0B,
+  TARE  = 0x0F,
+  WEIGHT = 0xCE,
+  SET_FACTOR = 0xCF,
+  CALIBRATE = 0X0C,
+};
 
 typedef enum {
   bigLoadCell = 0x00,
@@ -83,14 +118,14 @@ const unsigned char send_data_icon[] PROGMEM = {
 };
 
 const unsigned char not_connected_icon[] PROGMEM = {
-0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x03, 0x80, 
-	0x00, 0x00, 0x01, 0xc0, 0x07, 0xff, 0xff, 0xe0, 0x07, 0xff, 0xff, 0xe0, 0x06, 0x00, 0x01, 0xc0, 
-	0x06, 0x00, 0x03, 0x80, 0x06, 0x00, 0x07, 0x00, 0x06, 0x00, 0x0e, 0x00, 0x06, 0x00, 0x0c, 0x00, 
-	0x06, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 
-	0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x60, 
-	0x00, 0x30, 0x00, 0x60, 0x00, 0x70, 0x00, 0x60, 0x00, 0xe0, 0x00, 0x60, 0x01, 0xc0, 0x00, 0x60, 
-	0x03, 0x80, 0x00, 0x60, 0x07, 0xff, 0xff, 0xe0, 0x07, 0xff, 0xff, 0xe0, 0x03, 0x80, 0x00, 0x00, 
-	0x01, 0xc0, 0x00, 0x00, 0x00, 0xe0, 0x00, 0x00, 0x00, 0x70, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0xc8, 0x00, 0x00, 0xf7, 0xef, 0x00, 0x03, 0xf7, 0xef, 0xc0, 
+	0x0f, 0xc7, 0xe7, 0xe0, 0x1f, 0x07, 0xe0, 0xf8, 0x3c, 0x07, 0xc0, 0x3c, 0x70, 0x03, 0xc0, 0x1c, 
+	0x20, 0x7b, 0xdc, 0x08, 0x00, 0xfb, 0xdf, 0x00, 0x03, 0xe3, 0xcf, 0x80, 0x07, 0x81, 0x83, 0xc0, 
+	0x03, 0x01, 0x80, 0x80, 0x00, 0x05, 0xa0, 0x00, 0x00, 0x1d, 0xb8, 0x00, 0x00, 0x3d, 0xbc, 0x00, 
+	0x00, 0x38, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xc0, 0x00, 0x00, 0x07, 0xe0, 0x00, 
+	0x00, 0x07, 0xe0, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x00, 0x03, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
 
@@ -116,6 +151,7 @@ const unsigned char currentlyBigLoadCell_icon[] PROGMEM = {
 	0xe0, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x00, 0x07, 
 	0xe0, 0x00, 0x00, 0x07, 0x7f, 0xff, 0xff, 0xfe, 0x3f, 0xff, 0xff, 0xfc, 0x1f, 0xff, 0xff, 0xf8
 };
+
 const int bigScale_calVal_eepromAdress = 0;
 const int smallScale_calVal_eepromAdress = 0;
 unsigned long t = 0;
@@ -150,8 +186,8 @@ void swapLoadCell_buttonISR() {
 }
 
 //interrupt routine:
-void sendData_buttonISR() {
-  Serial.println("send");
+void sendData_buttonISR() { //TODO start timer button
+  //Serial.println("send");
 }
 
 
@@ -170,7 +206,92 @@ void smallScale_dataReadyISR() {
   }
 }
 
+
+std::vector<unsigned char> buildWeightMessage(int weight, int minutes, int seconds, int milliseconds)
+{
+  std::vector<unsigned char> message;
+  message.push_back(DECENT_SCALE_HEADER);
+  message.push_back(DecentAPICommands::WEIGHT);
+  message.push_back(weight >> 8);
+  message.push_back(weight);
+  message.push_back(minutes & 0xff);
+  message.push_back(seconds & 0xff);
+  message.push_back(milliseconds & 0xff);
+  message.push_back(0x00);
+  message.push_back(0x00);
+
+  unsigned char xor_result = 0;
+  for (uint8_t idx = 0; idx < 4; idx++)
+  {
+    xor_result ^= message[idx];
+  }
+
+  message.push_back(xor_result);
+  return message;
+}
+
+
+class serverCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer *pServer)
+  {
+    BLEConnected = true;
+    NimBLEDevice::startAdvertising();
+  };
+  void onDisconnect(NimBLEServer *pServer)
+  {
+    BLEConnected = false;
+    NimBLEDevice::startAdvertising();
+  };
+};
+
+
+class writeCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
+ void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) {
+  NimBLEAttValue val = pCharacteristic->getValue();
+  if (val.data()[0] != DECENT_SCALE_HEADER) {
+    return;
+  }
+  const uint8_t *data = val.data();
+  switch (data[1])
+  {
+  /* case DecentAPICommands::TIMER:
+    break; */
+  case DecentAPICommands::TARE:
+    if (tareCallback) {
+      tareCallback();
+      }
+    break;
+
+  case DecentAPICommands::SET_FACTOR:
+      if (val.length() < 6) {
+        break;
+      }
+      else {
+        uint32_t i32 = data[5] | (data[4] << 8) | (data[3] << 16) | (data[2] << 24);
+        determineAndSetCalibrationFactorFromKnownWeight_CALLBACK(i32 / 1000.f);
+      }
+    break;
+
+  case DecentAPICommands::CALIBRATE:
+      beginCalibrationOfCurrentLoadcell_CALLBACK();
+    break;
+  
+  default:
+    break;
+  }
+ }
+};
+
+NimBLECharacteristic *pWeightCharacteristic;
+NimBLEService *pService;
+NimBLEAdvertising *pAdvertising;
+
+static writeCharacteristicCallbacks writeCharacteristicCallback;
+
+
 void setup() {
+
+  preferences.begin("loadCellFactors", false);
 
   pinMode(BIG_SCALE_HX711_dout, INPUT);
   pinMode(BIG_SCALE_HX711_sck, OUTPUT);
@@ -184,55 +305,109 @@ void setup() {
   screen.setCursor(0,0);
   drawHeader();
   screen.display();
+  //load from eeprom
+  float BigCell_calibrationValue; 
+  BigCell_calibrationValue = preferences.getFloat("BigCellFactor", 1);
 
-    Serial.begin(115200); delay(10);
-    float BigCell_calibrationValue; 
-    BigCell_calibrationValue = 1868.20;
+  float smallScale_calibrationValue; 
+  smallScale_calibrationValue = preferences.getFloat("SmallCellFactor", 1);
 
-    float smallScale_calibrationValue; 
-    smallScale_calibrationValue = 10348.32; 
-    
-    #if defined(ESP8266) || defined(ESP32)
-    //EEPROM.begin(512); // uncomment this if you use ESP8266 and want to fetch the value from eeprom
-    #endif
-    //EEPROM.get(calVal_eepromAdress, BigCell_calibrationValue); // uncomment this if you want to fetch the value from eeprom
 
-    BigCell.begin();
-    SmallCell.begin();
-    //LoadCell.setReverseOutput();
 
-    unsigned long stabilizingtime = 2000; // tare preciscion can be improved by adding a few seconds of stabilizing time
+  BigCell.begin();
+  SmallCell.begin();
+  //LoadCell.setReverseOutput();
 
-    boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
-    BigCell.start(stabilizingtime, _tare);
+  unsigned long stabilizingtime = 2000; // tare preciscion can be improved by adding a few seconds of stabilizing time
 
-    if (BigCell.getTareTimeoutFlag()) {
-        Serial.println("Timeout, big loadCell failed to initialize check wiring");
-        while (1);
-    } else {
-        BigCell.setCalFactor(BigCell_calibrationValue); // set calibration value (float)
-        Serial.println("Startup is complete");
-    }
-    
-    SmallCell.start(stabilizingtime, _tare);
-    if (SmallCell.getTareTimeoutFlag()) {
-        Serial.println("Timeout, small loadCell failed to initialize check wiring");
-        while (1);
-    } else {
-        SmallCell.setCalFactor(smallScale_calibrationValue); // set calibration value (float)
-        Serial.println("Startup is complete");
-    }
-    swapLoadCell(currentLoadCell);
-    attachInterrupt(digitalPinToInterrupt(BIG_SCALE_HX711_dout), bigScale_dataReadyISR, FALLING);
-    attachInterrupt(digitalPinToInterrupt(SMALL_SCALE_HX711_dout), smallScale_dataReadyISR, FALLING);
-    attachInterrupt(digitalPinToInterrupt(sendDataPin), sendData_buttonISR , RISING);
-    attachInterrupt(digitalPinToInterrupt(swapLoadCellPin), swapLoadCell_buttonISR, RISING);
-    attachInterrupt(digitalPinToInterrupt(powerPin), toggle_power , RISING);
-    attachInterrupt(digitalPinToInterrupt(tarePin), tare_buttonISR , RISING);
+  boolean _tare = true; //set this to false if you don't want tare to be performed in the next step
+  BigCell.start(stabilizingtime, _tare);
 
+  if (BigCell.getTareTimeoutFlag()) {
+      while (1) {
+        screen.clearDisplay();
+        screen.setCursor(4, 4);
+        screen.printf("Failed to initialize Big Loadcell"); screen.display();
+      };
+  } else {
+    BigCell.setCalFactor(BigCell_calibrationValue); // set calibration value (float)
+  }
+  
+  SmallCell.start(stabilizingtime, _tare);
+  if (SmallCell.getTareTimeoutFlag()) {
+      while (1) {
+        screen.clearDisplay();
+        screen.setCursor(4, 4);
+        screen.printf("Failed to initialize Small Loadcell"); screen.display();
+      };
+  } else {
+    SmallCell.setCalFactor(smallScale_calibrationValue); // set calibration value (float)
+  }
+
+  swapLoadCell(currentLoadCell);
+  attachInterrupt(digitalPinToInterrupt(BIG_SCALE_HX711_dout), bigScale_dataReadyISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SMALL_SCALE_HX711_dout), smallScale_dataReadyISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(sendDataPin), sendData_buttonISR , RISING);
+  attachInterrupt(digitalPinToInterrupt(swapLoadCellPin), swapLoadCell_buttonISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(powerPin), toggle_power , RISING);
+  attachInterrupt(digitalPinToInterrupt(tarePin), tare_buttonISR , RISING);
+
+
+  NimBLEDevice::init(DEVICE_NAME);
+
+  NimBLEServer *pServer = NimBLEDevice::createServer();
+  pService = pServer->createService(DECENT_SCALE_SERVICE_UUID);  
+  pServer->setCallbacks(new serverCallbacks());
+  pWeightCharacteristic = pService->createCharacteristic(DECENT_SCALE_WEIGHT_CHARICTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+  pWeightCharacteristic->setValue(0);
+  NimBLECharacteristic *pWriteCharacteristic = pService->createCharacteristic(DECENT_SCALE_WRITE_CHARICTERISTIC_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
+  pWriteCharacteristic->setCallbacks(&writeCharacteristicCallback);
+
+  pAdvertising = pServer->getAdvertising();
+  pService->start();
+  pAdvertising->addServiceUUID(pService->getUUID());
+  pAdvertising->setName(DEVICE_NAME);
+  pAdvertising->start();
 }
 
+
+void tareCallback() {
+  BigCell.tare();
+  SmallCell.tare();
+}
+
+void beginCalibrationOfCurrentLoadcell_CALLBACK(){
+  if (currentLoadCell == bigLoadCell) {
+    BigCell.setCalFactor(1.0);  //resert to 1.0 to calibrate and get a new factor
+    delay(10);
+    BigCell.tare();
+  }
+  else {
+    SmallCell.setCalFactor(1.0);  //resert to 1.0 to calibrate and get a new factor
+    delay(10);
+    SmallCell.tare();
+  }
+}
+
+void determineAndSetCalibrationFactorFromKnownWeight_CALLBACK(float knownWeight) {
+  
+  if (currentLoadCell == bigLoadCell) {
+    BigCell.refreshDataSet();
+    float newCalibrationFactor = BigCell.getNewCalibration(knownWeight);
+    preferences.putFloat("BigCellFactor", newCalibrationFactor);
+  }
+  else {
+    SmallCell.refreshDataSet();
+    float newCalibrationFactor = SmallCell.getNewCalibration(knownWeight);
+    preferences.putFloat("SmallCellFactor", newCalibrationFactor);
+  }
+
+  preferences.end();
+}
+
+
 void loop() {
+  if (!pAdvertising->isAdvertising()) pAdvertising->start();
 
   if (tareAndWait) {
     if (currentLoadCell == bigLoadCell) BigCell.tare();
@@ -254,6 +429,18 @@ void loop() {
       smallScale_newDataReady = 0;
       break;
     }
+
+    if (pWeightCharacteristic->getService()->getServer()->getConnectedCount())
+    {
+      uint32_t time = millis();
+      int minutes = time / 1000 / 60;
+      int seconds = time / 1000 - (minutes * 60);
+      int milliseconds = time - (seconds * 1000) - (minutes * 60 * 1000);
+      pWeightCharacteristic->setValue(buildWeightMessage((load * 10), minutes, seconds, milliseconds));
+      pWeightCharacteristic->notify();
+    }
+
+    
     float normalizedValue = 0.8*load + 0.2*previousValue;
     previousValue = normalizedValue;
     screen.setCursor(38, 38);
@@ -283,7 +470,7 @@ void drawHeader(){
   screen.drawBitmap((0*32),0, power_icon, 32,32, WHITE);
   screen.drawBitmap((1*32),0, tare_icon, 32,32, WHITE);
   screen.drawBitmap((2*32),0, swap_cell, 32,32, WHITE);
-  if (true) screen.drawBitmap((3*32),0, send_data_icon, 32,32, WHITE); // chech if conected via bluetooth
+  if (BLEConnected) screen.drawBitmap((3*32),0, send_data_icon, 32,32, WHITE); // chech if conected via bluetooth
   else screen.drawBitmap((3*32),0, not_connected_icon, 32,32, WHITE);
 
   if (currentLoadCell == bigLoadCell) screen.drawBitmap(0, 32, currentlyBigLoadCell_icon, 32, 32, WHITE);
